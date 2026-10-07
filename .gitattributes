@@ -1,0 +1,7 @@
+* text=auto
+# Shell scripts and makefiles keep LF on Windows checkouts too (Git Bash and
+# make choke on CRLF).
+*.sh text eol=lf
+Makefile text eol=lf
+*.mk text eol=lf
+*.wav binary

@@ -1,0 +1,22 @@
+# Build output
+build/
+build_*/
+*.o
+*.d
+*.lst
+*.map
+*.elf
+*.bin
+*.hex
+*.exe
+*.obj
+
+# Editor and tool settings
+.vscode/
+.claude/
+
+# Source WAVs of the bundled IR headers (local only)
+tools/Marshall*.wav
+
+# convolver: optional local IR header from tools/wav2ir.py
+examples/convolver/ir_data.h

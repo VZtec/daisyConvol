@@ -1,0 +1,94 @@
+# Host suites (reference FFT with sanitizers; the target's CMSIS-DSP FFT
+# built for the host) and the firmware examples for the Daisy Seed, against
+# the libDaisy revision the library was developed with and the latest
+# release (CMSIS-DSP moved to a submodule in v7.0.0).
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: Host suites (${{ matrix.compiler }}, ASan + UBSan)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reference FFT suites
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then
+            export CC=clang CXX=clang++
+          fi
+          CMAKE_ARGS=-DDAISYCONVOL_SANITIZE=ON bash test/all.sh
+
+  cmsis-host:
+    name: Host suites on the CMSIS FFT (libDaisy ${{ matrix.libdaisy }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        libdaisy: [85172e2b5c9abea1bf56dcd5d2c7b3f5717eb66b, v9.0.0]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: electro-smith/libDaisy
+          ref: ${{ matrix.libdaisy }}
+          path: libDaisy
+          submodules: recursive
+      - name: Suites
+        run: LIBDAISY_DIR="$PWD/libDaisy" bash test/all.sh
+
+  firmware:
+    name: Examples (libDaisy ${{ matrix.libdaisy }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        libdaisy: [85172e2b5c9abea1bf56dcd5d2c7b3f5717eb66b, v9.0.0]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: daisyconvol
+      - uses: actions/checkout@v4
+        with:
+          repository: electro-smith/libDaisy
+          ref: ${{ matrix.libdaisy }}
+          path: libDaisy
+          submodules: recursive
+      - uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '10.3-2021.10'
+      - name: Build libDaisy
+        run: make -C libDaisy -j4 -s
+      - name: Build the examples
+        run: |
+          set -e
+          L=$GITHUB_WORKSPACE/libDaisy
+          E=daisyconvol/examples
+          for ex in seed cabsim hall_reverb church_reverb irswitch convolver; do
+            make -C $E/$ex LIBDAISY_DIR=$L -j4
+          done
+          make -C $E/convolver LIBDAISY_DIR=$L BLOCK=16 STEREO=1 BUILD_DIR=build_b16s -j4
+          make -C $E/convolver LIBDAISY_DIR=$L BLOCK=256 IR_LEN=4096 BUILD_DIR=build_b256 -j4
+          make -C $E/irswitch LIBDAISY_DIR=$L IR_LEN=48000 BUILD_DIR=build_long -j4
+          make -C $E/hall_reverb LIBDAISY_DIR=$L MONO=0 IR_LEN=96000 BUILD_DIR=build_stereo -j4
+      - name: Size of the minimal example
+        run: arm-none-eabi-size daisyconvol/examples/seed/build/daisyconvol_seed.elf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daisyconvol_seed-libdaisy-${{ matrix.libdaisy }}
+          path: daisyconvol/examples/seed/build/daisyconvol_seed.bin
