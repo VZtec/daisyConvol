@@ -110,7 +110,7 @@ void FftForward(FftPlan* plan, float* time_scratch, float* spec_out)
     memset(time_scratch, 0, n * sizeof(float));
 }
 
-void FftInverse(FftPlan* plan, float* spec_scratch, float* time_out)
+void FftInverseHalf(FftPlan* plan, float* spec_scratch, float* half_out)
 {
     const size_t n = plan->n;
     scratch_re[0]     = spec_scratch[0];
@@ -126,8 +126,8 @@ void FftInverse(FftPlan* plan, float* spec_scratch, float* time_out)
     }
     CFft(scratch_re, scratch_im, n, true);
     const double inv_n = 1.0 / (double)n;
-    for(size_t i = 0; i < n; i++)
-        time_out[i] = (float)(scratch_re[i] * inv_n);
+    for(size_t i = 0; i < n / 2; i++)
+        half_out[i] = (float)(scratch_re[n / 2 + i] * inv_n);
     memset(spec_scratch, 0, n * sizeof(float));
 }
 

@@ -548,11 +548,12 @@ void TestGeometries()
     Check(CE::FastFloats(bad_cfg) == 0 && !rig.Init(bad_cfg),
           "num_outputs > kMaxOutputs rejected");
 
-    // Relocation buffer for the B = 32 reverb set (FFT 64, 512, 4096): the
-    // table sizes measured in the target link map.
-    Check(CE::FftTableBytes(MakeConfig(32, 144000, true)) == 45968,
+    // Relocation buffer for the B = 32 reverb set (FFT 64, 512, 4096): per
+    // N-point FFT, 2N floats of twiddles and N/2 uint16 bin positions.
+    Check(CE::FftTableBytes(MakeConfig(32, 144000, true))
+              == 9 * (64 + 512 + 4096),
           "FftTableBytes(Config) for B = 32");
-    Check(CE::FftTableBytes(MakeConfig(32, 4096, true)) == 608 + 4976,
+    Check(CE::FftTableBytes(MakeConfig(32, 4096, true)) == 576 + 4608,
           "FftTableBytes(Config) for a B = 32 cabinet");
 
     // External IR mode: a main-loop stage only when asked for.
@@ -1927,8 +1928,7 @@ void TestFftRelocation(Rng& rng)
     const DVec ref  = Reference(x, ir, x.size());
     const double ok = ErrDb(RunEngine(rig.eng, x).y[0], ref, 0, x.size());
     // Overwrite the first half: twiddles only (floats come first and are
-    // most of the bytes; junk bit-reversal indices would write out of
-    // bounds).
+    // most of the bytes; junk bin positions would read out of bounds).
     std::vector<uint32_t> saved = ram;
     std::fill(ram.begin(), ram.begin() + ram.size() / 2, 0x3F800000u); // 1.0f
     rig.eng.SetIR(ir.data(), ir.size());

@@ -54,6 +54,31 @@ inline size_t CeilDiv(size_t a, size_t b)
 #define CONV_FMS(acc, x, y) ((acc) - (x) * (y))
 #endif
 
+// The inner loop of the bin-major MAC (CmacParts) in Thumb-2 / FPv5
+// assembly where it can be: 2 = VLDR.64 loads, 1 = VLDM loads, 0 = the C
+// loop (e.g. -DDAISYCONVOL_MAC_ASM=0). Measured in cabsim (code in ITCM),
+// engine cycles per block: C 45.5k, VLDM 36.2k, VLDR.64 35.5k. VLDR.64 is
+// ahead where a stage's spectra are in cached RAM (AXI SRAM); with every
+// arena in DTCM, VLDM is ahead by 1 %.
+#ifndef DAISYCONVOL_MAC_ASM
+#if defined(__GNUC__) && defined(__thumb2__) && defined(__ARM_ARCH_7EM__) \
+    && defined(__ARM_FEATURE_FMA)
+#define DAISYCONVOL_MAC_ASM 2
+#else
+#define DAISYCONVOL_MAC_ASM 0
+#endif
+#endif
+// Assembly MAC of the time-sliced stages: PLD the next partition's two cache
+// lines while the current one is multiplied (1), or not (0). Their spectra
+// and delay lines are in the medium arena, AXI SRAM behind the D-cache in
+// the recommended placement, and every line is a miss: in cabsim (code in
+// ITCM) the engine goes from 35.4k to 32.4k cycles per block (stage 1 19.2k
+// -> 16.1k). With the medium arena in DTCM there is nothing to prefetch and
+// the PLDs cost 0.8 % (31.5k -> 31.8k). Stage 0 (fast arena) never PLDs.
+#ifndef DAISYCONVOL_MAC_PLD
+#define DAISYCONVOL_MAC_PLD 1
+#endif
+
 CONV_HOT void ZeroF32(float* __restrict dst, size_t n)
 {
     size_t i = 0;
@@ -196,6 +221,284 @@ inline void CmulPacked(float* __restrict acc,
     acc[0] = a[0] * b[0];
     acc[1] = a[1] * b[1];
     CmulBins(acc + 2, a + 2, b + 2, n - 2);
+}
+
+// The MAC of a whole stage, bin-major: acc = sum over the partitions
+// k = 0..na+nb-1 of h_k * x_k, for the floats [i_beg, i_end) of the packed
+// spectra. h_k is h + k*n; x_k runs backwards through a delay line from its
+// newest slot and wraps once: xa - k*n for k < na (na >= 1), then
+// xb - (k-na)*n. For each group of bins the sums stay in registers across
+// all the partitions and acc is written once, instead of being read and
+// written once per partition. Per bin, the operations and their order are
+// CmulPacked's for partition 0, then CmacPacked's for each further one, so
+// the result is the same bit for bit as a pass one partition at a time.
+//
+// The bins go in groups of 8 floats: a whole cache line when the spectra
+// are 32-byte aligned (the arenas are), so each line is read in a single
+// visit even where the partitions' power-of-two strides make them evict
+// each other in the D-cache. i_beg and i_end are multiples of 8; the group
+// at 0 holds DC, Nyquist and bins 1-3, the others four bins each.
+//
+// One complex bin at float k: CmacBins' and CmulBins' operations.
+#define CONV_BIN_MAC(r, im, a, b, k)          \
+    r  = CONV_FMA(r, (a)[k], (b)[k]);         \
+    im = CONV_FMA(im, (a)[k], (b)[k + 1]);    \
+    r  = CONV_FMS(r, (a)[k + 1], (b)[k + 1]); \
+    im = CONV_FMA(im, (a)[k + 1], (b)[k])
+#define CONV_BIN_MUL(r, im, a, b, k)          \
+    r  = (a)[k] * (b)[k];                     \
+    im = (a)[k] * (b)[k + 1];                 \
+    r  = CONV_FMS(r, (a)[k + 1], (b)[k + 1]); \
+    im = CONV_FMA(im, (a)[k + 1], (b)[k])
+
+#if DAISYCONVOL_MAC_ASM
+// One run of CmacParts' inner loop: ns >= 1 partitions of one group of 8
+// floats into its 8 sums, a going up and b going down by stride bytes. The C
+// loop compiles to 16 single-float loads that do not pair with the 16 FMAs
+// (~47 cycles per partition from DTCM); here they are eight VLDR.64s (or
+// two VLDMs), and the FMAs are the same, in the same order per bin, as
+// CONV_BIN_MAC's: the output is the same bit for bit (checked on a Daisy
+// Seed against the C loop and the partition-at-a-time MAC). With kDc the
+// first two floats are DC and Nyquist (real products) instead of a complex
+// bin. s0-s15 hold the operands; the sums go wherever the compiler puts
+// them (s16-s31).
+#if DAISYCONVOL_MAC_ASM == 1
+#define CONV_MAC_LOADS                       \
+    "vldmia %[a], {s0-s7}\n\t"               \
+    "vldmia %[b], {s8-s15}\n\t"              \
+    "add %[a], %[a], %[st]\n\t"              \
+    "sub %[b], %[b], %[st]\n\t"
+#else
+#define CONV_MAC_LOADS                       \
+    "vldr d0, [%[a]]\n\t"                    \
+    "vldr d4, [%[b]]\n\t"                    \
+    "vldr d1, [%[a], #8]\n\t"                \
+    "vldr d5, [%[b], #8]\n\t"                \
+    "vldr d2, [%[a], #16]\n\t"               \
+    "vldr d6, [%[b], #16]\n\t"               \
+    "vldr d3, [%[a], #24]\n\t"               \
+    "vldr d7, [%[b], #24]\n\t"               \
+    "add %[a], %[a], %[st]\n\t"              \
+    "sub %[b], %[b], %[st]\n\t"
+#endif
+// After the pointers moved on: the next partition's lines (one partition
+// ahead measured best; two ahead, or issued before the loads, lost 2-3 %).
+#if DAISYCONVOL_MAC_PLD
+#define CONV_MAC_PLD                         \
+    "pld [%[a]]\n\t"                         \
+    "pld [%[b]]\n\t"
+#else
+#define CONV_MAC_PLD
+#endif
+#define CONV_MAC_BIN0                        \
+    "vfma.f32 %[r0], s0, s8\n\t"             \
+    "vfma.f32 %[i0], s0, s9\n\t"
+#define CONV_MAC_BIN0_END                    \
+    "vfms.f32 %[r0], s1, s9\n\t"             \
+    "vfma.f32 %[i0], s1, s8\n\t"
+#define CONV_MAC_DC_NYQUIST                  \
+    "vfma.f32 %[r0], s0, s8\n\t"             \
+    "vfma.f32 %[i0], s1, s9\n\t"
+#define CONV_MAC_BINS13                      \
+    "vfma.f32 %[r1], s2, s10\n\t"            \
+    "vfma.f32 %[i1], s2, s11\n\t"            \
+    "vfma.f32 %[r2], s4, s12\n\t"            \
+    "vfma.f32 %[i2], s4, s13\n\t"            \
+    "vfma.f32 %[r3], s6, s14\n\t"            \
+    "vfma.f32 %[i3], s6, s15\n\t"            \
+    "vfms.f32 %[r1], s3, s11\n\t"            \
+    "vfma.f32 %[i1], s3, s10\n\t"            \
+    "vfms.f32 %[r2], s5, s13\n\t"            \
+    "vfma.f32 %[i2], s5, s12\n\t"            \
+    "vfms.f32 %[r3], s7, s15\n\t"            \
+    "vfma.f32 %[i3], s7, s14\n\t"
+#define CONV_MAC_OPERANDS                                              \
+    : [r0] "+t"(r0), [i0] "+t"(i0), [r1] "+t"(r1), [i1] "+t"(i1),       \
+      [r2] "+t"(r2), [i2] "+t"(i2), [r3] "+t"(r3), [i3] "+t"(i3),       \
+      [a] "+r"(a), [b] "+r"(b), [k] "+r"(ns)                            \
+    : [st] "r"(stride)                                                  \
+    : "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", \
+      "s11", "s12", "s13", "s14", "s15", "cc", "memory"
+#define CONV_MAC_LOOP(PLD, FIRST, LAST)                                 \
+    __asm__ volatile("1:\n\t" CONV_MAC_LOADS PLD FIRST CONV_MAC_BINS13 \
+                         LAST "subs %[k], %[k], #1\n\t"                 \
+                     "bne 1b\n\t" CONV_MAC_OPERANDS)
+template <bool kDc, bool kPld>
+CONV_HOT __attribute__((always_inline)) inline void MacRunAsm(float&       r0,
+                                                              float&       i0,
+                                                              float&       r1,
+                                                              float&       i1,
+                                                              float&       r2,
+                                                              float&       i2,
+                                                              float&       r3,
+                                                              float&       i3,
+                                                              const float* a,
+                                                              const float* b,
+                                                              size_t       ns,
+                                                              size_t stride)
+{
+    if(kPld && kDc)
+        CONV_MAC_LOOP(CONV_MAC_PLD, CONV_MAC_DC_NYQUIST, "");
+    else if(kPld)
+        CONV_MAC_LOOP(CONV_MAC_PLD, CONV_MAC_BIN0, CONV_MAC_BIN0_END);
+    else if(kDc)
+        CONV_MAC_LOOP("", CONV_MAC_DC_NYQUIST, "");
+    else
+        CONV_MAC_LOOP("", CONV_MAC_BIN0, CONV_MAC_BIN0_END);
+}
+#undef CONV_MAC_LOADS
+#undef CONV_MAC_PLD
+#undef CONV_MAC_BIN0
+#undef CONV_MAC_BIN0_END
+#undef CONV_MAC_DC_NYQUIST
+#undef CONV_MAC_BINS13
+#undef CONV_MAC_OPERANDS
+#undef CONV_MAC_LOOP
+#endif // DAISYCONVOL_MAC_ASM
+
+template <bool kPld>
+CONV_HOT void CmacParts(float* __restrict acc,
+                        const float* __restrict h,
+                        const float* __restrict xa,
+                        size_t na,
+                        const float* __restrict xb,
+                        size_t nb,
+                        size_t n,
+                        size_t i_beg,
+                        size_t i_end)
+{
+    // Partition 0 (h, xa) assigns; two runs accumulate the others: the rest
+    // of the delay line down to its first slot, then from its last slot.
+    const float* ha = h + n;
+    const float* xa1 = na > 1 ? xa - n : nullptr;
+    const size_t na1 = na - 1;
+    const float* hb  = h + na * n;
+
+    size_t i = i_beg;
+    if(i == 0)
+    {
+        float d = h[0] * xa[0];
+        float q = h[1] * xa[1];
+        float r1, i1, r2, i2, r3, i3;
+        CONV_BIN_MUL(r1, i1, h, xa, 2);
+        CONV_BIN_MUL(r2, i2, h, xa, 4);
+        CONV_BIN_MUL(r3, i3, h, xa, 6);
+        for(size_t s = 0; s < 2; s++)
+        {
+            const float* hs = s ? hb : ha;
+            const float* xs = s ? xb : xa1;
+            const size_t ns = s ? nb : na1;
+#if DAISYCONVOL_MAC_ASM
+            if(ns)
+                MacRunAsm<true, kPld>(
+                    d, q, r1, i1, r2, i2, r3, i3, hs, xs, ns, n * sizeof(float));
+#else
+            for(size_t j = 0; j < ns; j++)
+            {
+                const float* a = hs + j * n;
+                const float* b = xs - j * n;
+                d              = CONV_FMA(d, a[0], b[0]);
+                q              = CONV_FMA(q, a[1], b[1]);
+                CONV_BIN_MAC(r1, i1, a, b, 2);
+                CONV_BIN_MAC(r2, i2, a, b, 4);
+                CONV_BIN_MAC(r3, i3, a, b, 6);
+            }
+#endif
+        }
+        acc[0] = d;
+        acc[1] = q;
+        acc[2] = r1;
+        acc[3] = i1;
+        acc[4] = r2;
+        acc[5] = i2;
+        acc[6] = r3;
+        acc[7] = i3;
+        i      = 8;
+    }
+
+    for(; i < i_end; i += 8)
+    {
+        float r0, i0, r1, i1, r2, i2, r3, i3;
+        {
+            const float* a = h + i;
+            const float* b = xa + i;
+            CONV_BIN_MUL(r0, i0, a, b, 0);
+            CONV_BIN_MUL(r1, i1, a, b, 2);
+            CONV_BIN_MUL(r2, i2, a, b, 4);
+            CONV_BIN_MUL(r3, i3, a, b, 6);
+        }
+        for(size_t s = 0; s < 2; s++)
+        {
+            const float* hs = s ? hb : ha;
+            const float* xs = s ? xb : xa1;
+            const size_t ns = s ? nb : na1;
+#if DAISYCONVOL_MAC_ASM
+            if(ns)
+                MacRunAsm<false, kPld>(r0,
+                                 i0,
+                                 r1,
+                                 i1,
+                                 r2,
+                                 i2,
+                                 r3,
+                                 i3,
+                                 hs + i,
+                                 xs + i,
+                                 ns,
+                                 n * sizeof(float));
+#else
+            for(size_t j = 0; j < ns; j++)
+            {
+                const float* a = hs + j * n + i;
+                const float* b = xs - j * n + i;
+                CONV_BIN_MAC(r0, i0, a, b, 0);
+                CONV_BIN_MAC(r1, i1, a, b, 2);
+                CONV_BIN_MAC(r2, i2, a, b, 4);
+                CONV_BIN_MAC(r3, i3, a, b, 6);
+            }
+#endif
+        }
+        acc[i]     = r0;
+        acc[i + 1] = i0;
+        acc[i + 2] = r1;
+        acc[i + 3] = i1;
+        acc[i + 4] = r2;
+        acc[i + 5] = i2;
+        acc[i + 6] = r3;
+        acc[i + 7] = i3;
+    }
+}
+#undef CONV_BIN_MAC
+#undef CONV_BIN_MUL
+
+// The MAC of a stage's ka partitions of spectra h against its
+// frequency-domain delay line, whose newest slot is w: partition k pairs
+// with slot w - k, or w + slots - k once that would be negative. Floats
+// [i_beg, i_end) of acc; nothing with no active partition.
+template <bool kPld>
+inline void CmacRing(float* __restrict acc,
+                     const float* __restrict h,
+                     const float* fdl,
+                     size_t       n,
+                     size_t       w,
+                     size_t       slots,
+                     size_t       ka,
+                     size_t       i_beg,
+                     size_t       i_end)
+{
+    if(ka == 0)
+        return;
+    const size_t na = ka < w + 1 ? ka : w + 1; // slots w down to 0
+    const size_t nb = ka - na;                 // then from slots - 1 down
+    CmacParts<kPld>(acc,
+                    h,
+                    fdl + w * n,
+                    na,
+                    nb ? fdl + (slots - 1) * n : nullptr,
+                    nb,
+                    n,
+                    i_beg,
+                    i_end);
 }
 
 // Wrap-safe "x >= y" for uint32 sequence counters.
@@ -827,31 +1130,26 @@ void ConvEngine::ProcessSliced(Sliced& st, const float* x)
     }
     else if(ph <= st.r - 2)
     {
-        // MAC chunk: each output's ka partitions spread evenly over the R-2
-        // middle phases (the first ka % (R-2) phases take one more).
-        // Partition 0 is always the first one computed and *assigns* acc,
-        // so the accumulator never needs clearing.
-        const size_t m = st.r - 2;
-        const size_t j = ph - 1;
+        // MAC chunk: the bins, in groups of 8 floats, spread evenly over
+        // the R-2 middle phases (the first groups % (R-2) phases take one
+        // more), each phase running all of an output's ka partitions over
+        // its bins. Every bin is written once, so acc never needs clearing.
+        const size_t m      = st.r - 2;
+        const size_t j      = ph - 1;
+        const size_t groups = st.n / 8;
+        const size_t base   = groups / m, extra = groups % m;
+        const size_t g_beg  = j * base + (j < extra ? j : extra);
+        const size_t g_end  = g_beg + base + (j < extra ? 1 : 0);
         for(size_t c = 0; c < num_outputs_; c++)
-        {
-            const size_t ka    = st.ka[c];
-            const size_t base  = ka / m, extra = ka % m;
-            const size_t k_beg = j * base + (j < extra ? j : extra);
-            const size_t k_end = k_beg + base + (j < extra ? 1 : 0);
-            const float* h     = st.h[c];
-            for(size_t k = k_beg; k < k_end; k++)
-            {
-                size_t idx = st.w + st.slots - k;
-                if(idx >= st.slots)
-                    idx -= st.slots;
-                if(k == 0)
-                    CmulPacked(st.acc[c], h, st.fdl + idx * st.n, st.n);
-                else
-                    CmacPacked(
-                        st.acc[c], h + k * st.n, st.fdl + idx * st.n, st.n);
-            }
-        }
+            CmacRing<true>(st.acc[c], // medium arena: prefetch
+                           st.h[c],
+                           st.fdl,
+                           st.n,
+                           st.w,
+                           st.slots,
+                           st.ka[c],
+                           8 * g_beg,
+                           8 * g_end);
     }
     else // last phase: IFFT and stage the P-sample output segments
     {
@@ -863,8 +1161,7 @@ void ConvEngine::ProcessSliced(Sliced& st, const float* x)
                 ZeroF32(dst, st.p);
                 continue;
             }
-            FftInverse(st.plan, st.acc[c], scr_rt_);
-            CopyF32(dst, scr_rt_ + st.p, st.p);
+            FftInverseHalf(st.plan, st.acc[c], dst);
         }
     }
     // Append the incoming block (belongs to the frame in progress).
@@ -1017,18 +1314,17 @@ void ConvEngine::Process(const float* in, float* const* outs, size_t n)
             ZeroF32(outs[c], B);
             continue;
         }
-        for(size_t k = 0; k < ka; k++)
-        {
-            size_t idx = w0_ + k0_slots_ - k;
-            if(idx >= k0_slots_)
-                idx -= k0_slots_;
-            if(k == 0)
-                CmulPacked(acc0_, h0_[c], fdl0_ + idx * n0_, n0_);
-            else
-                CmacPacked(acc0_, h0_[c] + k * n0_, fdl0_ + idx * n0_, n0_);
-        }
-        FftInverse(plan0_, acc0_, scr_rt_);
-        CopyF32(outs[c], scr_rt_ + B, B); // overlap-save: last B samples
+        CmacRing<false>( // the fast arena: DTCM, nothing to prefetch
+            acc0_,
+            h0_[c],
+            fdl0_,
+            n0_,
+            w0_,
+            k0_slots_,
+            ka,
+            0,
+            n0_);
+        FftInverseHalf(plan0_, acc0_, outs[c]); // overlap-save: last B
     }
 
     const uint32_t t1 = timed ? get_cycles_() : 0;
@@ -1258,10 +1554,7 @@ bool ConvEngine::DoBackgroundStep()
             if(k2a_[c] == 0)
                 ZeroF32(dst, p2_);
             else
-            {
-                FftInverse(plan2_, acc2_[c], scr_bg_);
-                CopyF32(dst, scr_bg_ + p2_, p2_);
-            }
+                FftInverseHalf(plan2_, acc2_[c], dst);
             if(++bg_c_ < num_outputs_)
                 break;
             // A Reset() while we worked makes this frame meaningless: leave

@@ -2,7 +2,7 @@
 // Real-FFT backend interface for the partitioned convolution engine.
 //
 // Two implementations exist:
-//   - fft_backend_cmsis.cpp : target build, wraps CMSIS-DSP arm_rfft_fast_f32
+//   - fft_backend_cmsis.cpp : target build, on CMSIS-DSP's complex FFT
 //                             (also builds on a PC for the test harness).
 //   - fft_backend_ref.cpp   : desktop/test build, portable double-precision
 //                             reference producing the exact same packed layout.
@@ -33,30 +33,24 @@ FftPlan* FftMakePlan(size_t nfft);
 // time_scratch: nfft floats, DESTROYED by the call. spec_out: nfft floats.
 void FftForward(FftPlan* plan, float* time_scratch, float* spec_out);
 
-// spec_scratch: nfft floats, DESTROYED by the call. time_out: nfft floats.
-// Includes 1/N scaling.
-void FftInverse(FftPlan* plan, float* spec_scratch, float* time_out);
+// Inverse, keeping only the second half of the time signal: samples
+// nfft/2 .. nfft-1, the part overlap-save uses. spec_scratch: nfft floats,
+// DESTROYED by the call. half_out: nfft/2 floats. Includes 1/N scaling.
+void FftInverseHalf(FftPlan* plan, float* spec_scratch, float* half_out);
 
-// Bytes of twiddle / bit-reversal tables used by the plans created so far
-// and not relocated yet (0 if the backend has no tables).
+// Bytes of the tables used by the plans created so far and not relocated
+// yet (0 if the backend has no tables).
 size_t FftTableBytes();
 
 // Bytes of those tables for one nfft-point FFT in the CMSIS backend (0 for
 // an unsupported size), for sizing a static buffer: the complex twiddles of
 // the nfft/2-point CFFT and the real-stage twiddles (nfft floats each), plus
-// the CFFT's bit-reversal table (uint16 entries).
+// where the CFFT leaves each of its nfft/2 bins (uint16 entries).
 constexpr size_t FftTableBytesFor(size_t nfft)
 {
-    const size_t bitrev = nfft == 32     ? 20
-                          : nfft == 64   ? 48
-                          : nfft == 128  ? 56
-                          : nfft == 256  ? 208
-                          : nfft == 512  ? 440
-                          : nfft == 1024 ? 448
-                          : nfft == 2048 ? 1800
-                          : nfft == 4096 ? 3808
-                                         : 0;
-    return bitrev ? 2 * nfft * sizeof(float) + bitrev * 2 : 0;
+    return nfft >= 32 && nfft <= 4096 && (nfft & (nfft - 1)) == 0
+               ? 2 * nfft * sizeof(float) + nfft / 2 * 2
+               : 0;
 }
 
 // Copies those tables to dst (at least FftTableBytes() bytes, 4-byte

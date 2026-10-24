@@ -8,7 +8,7 @@ Same engine setup as [hall_reverb](../hall_reverb/README.md): the first 4096
 samples of the IR run in the audio callback, the rest (2048-sample
 partitions, spectra and delay line in SDRAM) in the main loop in bounded
 `DoBackgroundStep()` pieces. The church decays in about 5.5 s (RT60): the IR
-is cut at 5 s, the practical maximum for a mono reverb (~79 % CPU), with a
+is cut at 5 s, the practical maximum for a mono reverb (~76 % CPU), with a
 500 ms fade-out.
 
 ## The IR

@@ -51,23 +51,26 @@ the total CPU share of each, plus underruns.
 
 ## Measured
 
-Daisy Seed, 480 MHz, code in QSPI, block 32, 30 s per run, no underruns in
-any. Mono (`MONO=1 IR_LEN=<samples>`):
+Daisy Seed, 480 MHz, code in QSPI, block 32, 25 s per run, no underruns in
+any. The main-loop share is frame cycles × 48000 / 2048 frames per second
+/ 480 MHz. Mono (`MONO=1 IR_LEN=<samples>`):
 
 | IR | Callback avg / peak | Main-loop frame avg / peak | CPU callback + main loop | SDRAM |
 |----|---------------------|----------------------------|--------------------------|-------|
-| 1 s | 33.8 k / 14 % | 3.07 M / 3.26 M | 10.5 + 14.7 = **25 %** | 1.1 MB |
-| 2 s | 34.1 k / 14 % | 5.80 M / 6.05 M | 10.6 + 27.7 = **38 %** | 2.2 MB |
-| 3 s | 34.2 k / 14 % | 8.67 M / 9.03 M | 10.7 + 41.5 = **52 %** | 3.3 MB |
-| 4 s | 34.4 k / 14 % | 11.4 M / 11.8 M | 10.7 + 54.4 = **65 %** | 4.4 MB |
-| 5 s | 34.7 k / 14 % | 14.3 M / 14.8 M | 10.8 + 68.3 = **79 %** | 5.6 MB |
-| 6 s | 34.8 k / 14 % | 16.9 M / 17.5 M | 10.8 + 81.1 = **92 %** | 6.7 MB |
+| 1 s | 21.0 k / 15 % | 3.15 M / 3.30 M | 6.6 + 15.4 = **22 %** | 1.1 MB |
+| 2 s | 21.5 k / 15 % | 5.84 M / 6.11 M | 6.7 + 28.5 = **35 %** | 2.2 MB |
+| 3 s | 21.8 k / 15 % | 8.67 M / 9.00 M | 6.8 + 42.3 = **49 %** | 3.3 MB |
+| 4 s | 22.2 k / 15 % | 11.4 M / 11.8 M | 6.9 + 55.5 = **62 %** | 4.4 MB |
+| 5 s | 22.6 k / 15 % | 14.2 M / 14.7 M | 7.0 + 69.1 = **76 %** | 5.6 MB |
+| 6 s | (estimated) | ~16.9 M / ~17.6 M | ~7 + ~82.5 = **~90 %** | 6.7 MB |
 
-Stereo (`MONO=0`): 2 s 17.0 + 45 = ~62 %, 3 s 17.1 + 67 = ~84 %.
+The included IR is 5 s long, so the 6 s row is extrapolated (each second
+adds ~2.75 M cycles per frame). Stereo (`MONO=0`): 2 s 10.6 + 45.6 = ~56 %,
+3 s 10.8 + 67.9 = ~79 %.
 
 The main loop has one frame period (2048 samples = 20.48 M cycles) for each
-frame, and the audio callbacks take ~11 % of that time: at 6 s the peak
-frame (17.5 M) plus the callbacks (~2.2 M) is 97 % of the window, with no
-headroom left for anything else in the loop. 5 s is the practical maximum
-for a mono reverb with the default settings; each extra second costs ~13.5 %
-CPU (SDRAM bandwidth).
+frame, and the audio callbacks take ~7 % of that time: at 6 s the peak
+frame (~17.6 M) plus the callbacks (~1.4 M) would be ~93 % of the window,
+with little headroom left for anything else in the loop. 5 s is the
+practical maximum for a mono reverb with the default settings; each extra
+second costs ~13.5 % CPU (SDRAM bandwidth).
