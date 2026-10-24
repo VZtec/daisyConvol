@@ -28,6 +28,11 @@ RESET, release BOOT, or send `D` over the USB serial port):
     make
     make program-dfu
 
+`make ITCM=1` runs the engine and the CMSIS FFT from the ITCM instead of
+from QSPI through the I-cache, as an app with other heavy DSP would place
+them (the linker script is generated from libDaisy's, and `cabsim.cpp`
+copies the code at boot).
+
 ## Controls (USB serial, 115200)
 
 | Key | |
@@ -38,9 +43,11 @@ RESET, release BOOT, or send `D` over the USB serial port):
 | `b` | bypass |
 | `D` | reset into the bootloader |
 
-Once per second it prints the audio callback load.
+Once per second it prints the audio callback load, and the engine's
+average per block: in total, stage 0 and the time-sliced stage 1.
 
 ## Measured
 
-Daisy Seed, 480 MHz, code in QSPI, two 4096-sample IRs: callback 52.5 k
-cycles average (16.4 % of the 320 k per block), 78 k peak (24 %).
+Daisy Seed, 480 MHz, two 4096-sample IRs, 20 s runs. Code in QSPI:
+callback 47.7 k cycles average (14.9 % of the 320 k per block), 79 k peak
+(25 %). With `make ITCM=1`: 46.4 k average (14.5 %), 67 k peak (21 %).

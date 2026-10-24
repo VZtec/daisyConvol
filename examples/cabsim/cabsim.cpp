@@ -29,6 +29,25 @@
 
 using namespace daisy;
 
+#ifdef CABSIM_ITCM
+// make ITCM=1: the engine's and the FFT's code is linked to the ITCM but
+// stored in QSPI (see the Makefile). It is copied from .preinit_array, so
+// before any C++ static initializer: the FFT backend's lives there too.
+extern "C" uint32_t _sitcmram_text, _itcmram_text_start, _itcmram_text_end;
+
+static void CopyCodeToItcm()
+{
+    const volatile uint32_t* src = &_sitcmram_text;
+    volatile uint32_t*       dst = &_itcmram_text_start;
+    while(dst < &_itcmram_text_end)
+        *dst++ = *src++;
+    __DSB();
+    __ISB();
+}
+__attribute__((section(".preinit_array"), used)) static void (*const
+    copy_code_to_itcm)() = CopyCodeToItcm;
+#endif
+
 namespace
 {
 
@@ -218,16 +237,20 @@ int main(void)
             cb_cycles_peak = 0;
             __enable_irq();
             const uint32_t avg = n ? (uint32_t)(sum / n) : 0;
-            const auto     pf  = engine.perf();
+            // The engine's own averages over the same second: stage 0 and
+            // the time-sliced stage 1, per block.
+            const auto pf = engine.perf();
+            engine.ResetPerf();
             usblog::Line(hw, "callback avg %lu (%lu.%lu%%) peak %lu (%lu%%) cyc | "
-                         "engine s0 %lu sliced %lu",
+                         "engine avg %lu: s0 %lu sliced %lu",
                          avg,
                          avg * 100 / kBudget,
                          avg * 1000 / kBudget % 10,
                          peak,
                          peak * 100 / kBudget,
-                         pf.stage0.peak,
-                         pf.stage1_slice.peak);
+                         pf.callback.Avg(),
+                         pf.stage0.Avg(),
+                         pf.stage1_slice.Avg());
             hw.SetLed(led = !led);
         }
     }
