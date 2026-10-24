@@ -232,10 +232,10 @@ int main(void)
     hw.StartAudio(AudioCallback);
 
     const daisyconvol::Geometry& geo = engine.geometry();
-    // Main-loop stage frames per second (one per period of that stage).
-    const uint32_t bg_frames_per_s
-        = geo.background ? 48000u / (uint32_t)geo.part[geo.num_stages - 1]
-                         : 0;
+    // Main-loop stage partition: one frame per P samples, 48000 / P frames
+    // per second (23.4 at P = 2048); 0 without that stage.
+    const uint32_t bg_part
+        = geo.background ? (uint32_t)geo.part[geo.num_stages - 1] : 0;
     constexpr uint32_t kBudget = kBlockSize * 10000; // cycles per block
 
     uint32_t last = System::GetNow();
@@ -311,8 +311,10 @@ int main(void)
             const auto     pf  = engine.perf();
             // CPU share, in tenths of a percent of 480 MHz.
             const uint32_t cb_pm = avg * 1000 / kBudget;
-            const uint32_t bg_pm = (uint32_t)((uint64_t)pf.stage2_frame.Avg()
-                                              * bg_frames_per_s / 480000);
+            const uint32_t bg_pm
+                = bg_part ? (uint32_t)((uint64_t)pf.stage2_frame.Avg() * 48000
+                                       / bg_part / 480000)
+                          : 0;
             usblog::Line(hw, "callback avg %lu peak %lu (%lu%%) | main-loop frame "
                          "avg %lu peak %lu | CPU %lu.%lu%% + %lu.%lu%% | undr "
                          "%lu late %lu drop %lu",
