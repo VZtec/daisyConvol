@@ -54,6 +54,21 @@ inline size_t CeilDiv(size_t a, size_t b)
 #define CONV_FMS(acc, x, y) ((acc) - (x) * (y))
 #endif
 
+// The inner loop of the bin-major MAC (CmacParts) in Thumb-2 / FPv5
+// assembly where it can be: 2 = VLDR.64 loads, 1 = VLDM loads, 0 = the C
+// loop (e.g. -DDAISYCONVOL_MAC_ASM=0). Measured in cabsim (code in ITCM),
+// engine cycles per block: C 45.5k, VLDM 36.2k, VLDR.64 35.5k. VLDR.64 is
+// ahead where a stage's spectra are in cached RAM (AXI SRAM); with every
+// arena in DTCM, VLDM is ahead by 1 %.
+#ifndef DAISYCONVOL_MAC_ASM
+#if defined(__GNUC__) && defined(__thumb2__) && defined(__ARM_ARCH_7EM__) \
+    && defined(__ARM_FEATURE_FMA)
+#define DAISYCONVOL_MAC_ASM 2
+#else
+#define DAISYCONVOL_MAC_ASM 0
+#endif
+#endif
+
 CONV_HOT void ZeroF32(float* __restrict dst, size_t n)
 {
     size_t i = 0;
@@ -225,6 +240,92 @@ inline void CmulPacked(float* __restrict acc,
     im = (a)[k] * (b)[k + 1];                 \
     r  = CONV_FMS(r, (a)[k + 1], (b)[k + 1]); \
     im = CONV_FMA(im, (a)[k + 1], (b)[k])
+
+#if DAISYCONVOL_MAC_ASM
+// One run of CmacParts' inner loop: ns >= 1 partitions of one group of 8
+// floats into its 8 sums, a going up and b going down by stride bytes. The C
+// loop compiles to 16 single-float loads that do not pair with the 16 FMAs
+// (~47 cycles per partition from DTCM); here they are eight VLDR.64s (or
+// two VLDMs), and the FMAs are the same, in the same order per bin, as
+// CONV_BIN_MAC's: the output is the same bit for bit (checked on a Daisy
+// Seed against the C loop and the partition-at-a-time MAC). With kDc the
+// first two floats are DC and Nyquist (real products) instead of a complex
+// bin. s0-s15 hold the operands; the sums go wherever the compiler puts
+// them (s16-s31).
+#if DAISYCONVOL_MAC_ASM == 1
+#define CONV_MAC_LOADS                       \
+    "vldmia %[a], {s0-s7}\n\t"               \
+    "vldmia %[b], {s8-s15}\n\t"              \
+    "add %[a], %[a], %[st]\n\t"              \
+    "sub %[b], %[b], %[st]\n\t"
+#else
+#define CONV_MAC_LOADS                       \
+    "vldr d0, [%[a]]\n\t"                    \
+    "vldr d4, [%[b]]\n\t"                    \
+    "vldr d1, [%[a], #8]\n\t"                \
+    "vldr d5, [%[b], #8]\n\t"                \
+    "vldr d2, [%[a], #16]\n\t"               \
+    "vldr d6, [%[b], #16]\n\t"               \
+    "vldr d3, [%[a], #24]\n\t"               \
+    "vldr d7, [%[b], #24]\n\t"               \
+    "add %[a], %[a], %[st]\n\t"              \
+    "sub %[b], %[b], %[st]\n\t"
+#endif
+#define CONV_MAC_BINS13                      \
+    "vfma.f32 %[r1], s2, s10\n\t"            \
+    "vfma.f32 %[i1], s2, s11\n\t"            \
+    "vfma.f32 %[r2], s4, s12\n\t"            \
+    "vfma.f32 %[i2], s4, s13\n\t"            \
+    "vfma.f32 %[r3], s6, s14\n\t"            \
+    "vfma.f32 %[i3], s6, s15\n\t"            \
+    "vfms.f32 %[r1], s3, s11\n\t"            \
+    "vfma.f32 %[i1], s3, s10\n\t"            \
+    "vfms.f32 %[r2], s5, s13\n\t"            \
+    "vfma.f32 %[i2], s5, s12\n\t"            \
+    "vfms.f32 %[r3], s7, s15\n\t"            \
+    "vfma.f32 %[i3], s7, s14\n\t"
+#define CONV_MAC_OPERANDS                                              \
+    : [r0] "+t"(r0), [i0] "+t"(i0), [r1] "+t"(r1), [i1] "+t"(i1),       \
+      [r2] "+t"(r2), [i2] "+t"(i2), [r3] "+t"(r3), [i3] "+t"(i3),       \
+      [a] "+r"(a), [b] "+r"(b), [k] "+r"(ns)                            \
+    : [st] "r"(stride)                                                  \
+    : "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", \
+      "s11", "s12", "s13", "s14", "s15", "cc", "memory"
+template <bool kDc>
+CONV_HOT __attribute__((always_inline)) inline void MacRunAsm(float&       r0,
+                                                              float&       i0,
+                                                              float&       r1,
+                                                              float&       i1,
+                                                              float&       r2,
+                                                              float&       i2,
+                                                              float&       r3,
+                                                              float&       i3,
+                                                              const float* a,
+                                                              const float* b,
+                                                              size_t       ns,
+                                                              size_t stride)
+{
+    if(kDc)
+        __asm__ volatile("1:\n\t" CONV_MAC_LOADS
+                         "vfma.f32 %[r0], s0, s8\n\t" // DC
+                         "vfma.f32 %[i0], s1, s9\n\t" // Nyquist
+                         CONV_MAC_BINS13
+                         "subs %[k], %[k], #1\n\t"
+                         "bne 1b\n\t" CONV_MAC_OPERANDS);
+    else
+        __asm__ volatile("1:\n\t" CONV_MAC_LOADS
+                         "vfma.f32 %[r0], s0, s8\n\t"
+                         "vfma.f32 %[i0], s0, s9\n\t" CONV_MAC_BINS13
+                         "vfms.f32 %[r0], s1, s9\n\t"
+                         "vfma.f32 %[i0], s1, s8\n\t"
+                         "subs %[k], %[k], #1\n\t"
+                         "bne 1b\n\t" CONV_MAC_OPERANDS);
+}
+#undef CONV_MAC_LOADS
+#undef CONV_MAC_BINS13
+#undef CONV_MAC_OPERANDS
+#endif // DAISYCONVOL_MAC_ASM
+
 CONV_HOT void CmacParts(float* __restrict acc,
                         const float* __restrict h,
                         const float* __restrict xa,
@@ -256,16 +357,22 @@ CONV_HOT void CmacParts(float* __restrict acc,
             const float* hs = s ? hb : ha;
             const float* xs = s ? xb : xa1;
             const size_t ns = s ? nb : na1;
+#if DAISYCONVOL_MAC_ASM
+            if(ns)
+                MacRunAsm<true>(
+                    d, q, r1, i1, r2, i2, r3, i3, hs, xs, ns, n * sizeof(float));
+#else
             for(size_t j = 0; j < ns; j++)
             {
                 const float* a = hs + j * n;
                 const float* b = xs - j * n;
-                d += a[0] * b[0];
-                q += a[1] * b[1];
+                d              = CONV_FMA(d, a[0], b[0]);
+                q              = CONV_FMA(q, a[1], b[1]);
                 CONV_BIN_MAC(r1, i1, a, b, 2);
                 CONV_BIN_MAC(r2, i2, a, b, 4);
                 CONV_BIN_MAC(r3, i3, a, b, 6);
             }
+#endif
         }
         acc[0] = d;
         acc[1] = q;
@@ -294,6 +401,21 @@ CONV_HOT void CmacParts(float* __restrict acc,
             const float* hs = s ? hb : ha;
             const float* xs = s ? xb : xa1;
             const size_t ns = s ? nb : na1;
+#if DAISYCONVOL_MAC_ASM
+            if(ns)
+                MacRunAsm<false>(r0,
+                                 i0,
+                                 r1,
+                                 i1,
+                                 r2,
+                                 i2,
+                                 r3,
+                                 i3,
+                                 hs + i,
+                                 xs + i,
+                                 ns,
+                                 n * sizeof(float));
+#else
             for(size_t j = 0; j < ns; j++)
             {
                 const float* a = hs + j * n + i;
@@ -303,6 +425,7 @@ CONV_HOT void CmacParts(float* __restrict acc,
                 CONV_BIN_MAC(r2, i2, a, b, 4);
                 CONV_BIN_MAC(r3, i3, a, b, 6);
             }
+#endif
         }
         acc[i]     = r0;
         acc[i + 1] = i0;
