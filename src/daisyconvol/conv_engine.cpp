@@ -1161,8 +1161,7 @@ void ConvEngine::ProcessSliced(Sliced& st, const float* x)
                 ZeroF32(dst, st.p);
                 continue;
             }
-            FftInverse(st.plan, st.acc[c], scr_rt_);
-            CopyF32(dst, scr_rt_ + st.p, st.p);
+            FftInverseHalf(st.plan, st.acc[c], dst);
         }
     }
     // Append the incoming block (belongs to the frame in progress).
@@ -1325,8 +1324,7 @@ void ConvEngine::Process(const float* in, float* const* outs, size_t n)
             ka,
             0,
             n0_);
-        FftInverse(plan0_, acc0_, scr_rt_);
-        CopyF32(outs[c], scr_rt_ + B, B); // overlap-save: last B samples
+        FftInverseHalf(plan0_, acc0_, outs[c]); // overlap-save: last B
     }
 
     const uint32_t t1 = timed ? get_cycles_() : 0;
@@ -1556,10 +1554,7 @@ bool ConvEngine::DoBackgroundStep()
             if(k2a_[c] == 0)
                 ZeroF32(dst, p2_);
             else
-            {
-                FftInverse(plan2_, acc2_[c], scr_bg_);
-                CopyF32(dst, scr_bg_ + p2_, p2_);
-            }
+                FftInverseHalf(plan2_, acc2_[c], dst);
             if(++bg_c_ < num_outputs_)
                 break;
             // A Reset() while we worked makes this frame meaningless: leave

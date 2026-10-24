@@ -201,8 +201,12 @@ QSPI (`make program-boot` once).
   in the main loop. The main loop and the callback exchange data through a
   lock-free single-producer / single-consumer handoff.
 
-The FFTs are CMSIS-DSP's `arm_rfft_fast_f32`, using overlap-save with
-2P-point FFTs.
+The convolution is overlap-save with 2P-point real FFTs. They run on the
+complex FFT of CMSIS-DSP (the butterflies of `arm_rfft_fast_f32`), without
+its bit-reversal pass: the real-spectrum split reads the bins where the
+butterflies leave them, and the inverse is the same forward transform
+(IDFT(Z)[m] = DFT(Z)[-m] / M), computing only the half of the output that
+overlap-save keeps.
 
 **Choosing the geometry.** `ConvEngine::MakeGeometry` derives it from the
 block size and the maximum IR length, or you can pass your own in
