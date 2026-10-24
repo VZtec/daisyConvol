@@ -48,6 +48,6 @@ average per block: in total, stage 0 and the time-sliced stage 1.
 
 ## Measured
 
-Daisy Seed, 480 MHz, two 4096-sample IRs, 20 s runs. Code in QSPI:
-callback 34.2 k cycles average (10.7 % of the 320 k per block), 67 k peak
-(21 %). With `make ITCM=1`: 30.2 k average (9.4 %), 51 k peak (16 %).
+Daisy Seed, 480 MHz, two 4096-sample IRs, 20-25 s runs. Code in QSPI:
+callback 34.3 k cycles average (10.7 % of the 320 k per block), 71 k peak
+(22 %). With `make ITCM=1`: 30.2 k average (9.4 %), 51 k peak (16 %).
