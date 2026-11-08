@@ -11,6 +11,9 @@ build_*/
 *.exe
 *.obj
 
+# Python bytecode (tools/)
+__pycache__/
+
 # Editor and tool settings
 .vscode/
 .claude/
