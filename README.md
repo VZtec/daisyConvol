@@ -159,7 +159,7 @@ Before `make program-dfu`, put the Seed in DFU mode: hold BOOT, press RESET,
 release BOOT. Alternatively, flash `build/mycab.bin` with the [Daisy Web
 Programmer](https://electro-smith.github.io/Programmer/).
 
-A cabinet app fits the 128 KB internal flash: `examples/seed` takes 101 KB.
+A cabinet app fits the 128 KB internal flash: `examples/seed` takes 103 KB.
 Long IRs embedded as headers do not fit (a 5 s IR is 940 KB). Such apps run
 from QSPI under the Daisy bootloader: set `APP_TYPE = BOOT_QSPI` in the
 Makefile, run `make program-boot` once, then `make program-dfu` as usual.
@@ -395,13 +395,13 @@ DaisyToolchain). The figures are for the whole firmware, libDaisy included.
 
 | Region | libDaisy 85172e2b | libDaisy v9.0.0 | Capacity |
 |--------|------------------:|----------------:|---------:|
-| Flash (internal) | 101,080 B | 107,776 B | 131,072 B |
+| Flash (internal) | 102,552 B | 109,240 B | 131,072 B |
 | DTCM | 16,896 B | 16,896 B | 131,072 B |
-| AXI SRAM | 70,972 B | 71,544 B | 524,288 B |
+| AXI SRAM | 71,588 B | 72,160 B | 524,288 B |
 | D2 SRAM (libDaisy's audio DMA buffers) | 16,384 B | 16,384 B | 294,912 B |
 | SDRAM | 0 | 0 | 64 MB |
 
-`arm-none-eabi-size` (85172e2b): text 98,076, data 3,004, bss 101,960. Of
+`arm-none-eabi-size` (85172e2b): text 99,548, data 3,004, bss 102,576. Of
 these, the engine's arenas are 16 KB (DTCM) + 56 KB (AXI SRAM). The IR is
 16 KB of flash, and the FFT tables for block 32 are 5.5 KB.
 
@@ -409,10 +409,10 @@ The QSPI examples (libDaisy 85172e2b):
 
 | Example | QSPI flash | DTCM | AXI SRAM | SDRAM |
 |---------|-----------:|-----:|---------:|------:|
-| cabsim (two 4096-sample IRs) | 129,932 B | 30,688 B | 112,240 B | 0 |
-| hall_reverb (5 s IR) | 1,099,152 B | 49,664 B | 178,696 B | 3,712 KB |
-| church_reverb (5 s IR) | 1,099,156 B | 49,664 B | 178,696 B | 3,712 KB |
-| irswitch (4096-sample IRs) | 100,536 B | 16,896 B | 161,272 B | 16,388 B |
+| cabsim (two 4096-sample IRs) | 131,100 B | 30,272 B | 112,856 B | 0 |
+| hall_reverb (5 s IR) | 1,100,736 B | 49,664 B | 179,472 B | 3,712 KB |
+| church_reverb (5 s IR) | 1,100,740 B | 49,664 B | 179,472 B | 3,712 KB |
+| irswitch (4096-sample IRs) | 102,008 B | 16,896 B | 161,472 B | 16,388 B |
 
 ## Performance
 
