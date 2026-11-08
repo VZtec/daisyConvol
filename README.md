@@ -60,7 +60,7 @@ As a git submodule next to libDaisy:
 
 ```sh
 git submodule add https://github.com/VZtec/daisyConvol lib/daisyconvol
-git -C lib/daisyconvol checkout v0.1.0
+git -C lib/daisyconvol checkout v0.2.0
 ```
 
 Your Makefile names its sources and libDaisy, sets any [build
