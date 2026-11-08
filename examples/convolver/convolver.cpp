@@ -85,9 +85,10 @@ alignas(32) float                   fast_mem[NonZero(kFastFloats)];
 alignas(32) float                   medium_mem[NonZero(kMediumFloats)];
 alignas(32) DAISYCONVOL_SDRAM float slow_mem[NonZero(kSlowFloats)];
 
-// The FFT twiddle / bit-reversal tables live in flash, which here is QSPI:
-// they are copied to AXI SRAM at startup (every FFT then reads them from
-// RAM; 46 KB at B = 32 with a reverb). make TABLES_IN_RAM=0 skips it.
+// The FFT twiddle tables live in flash, which here is QSPI: they are copied
+// to AXI SRAM at startup, with the bin-position tables (every FFT then reads
+// them from RAM; 42 KB at B = 32 with a reverb). make TABLES_IN_RAM=0 skips
+// it.
 #ifndef CONV_TABLES_IN_RAM
 #define CONV_TABLES_IN_RAM 1
 #endif

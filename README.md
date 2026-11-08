@@ -18,7 +18,7 @@ samples to seconds long, in real time.
 - **From cabinets to 5 s reverbs.** A 4096-sample cabinet runs entirely in
   the callback, from internal RAM. Longer IRs add a stage that runs in the
   main loop from SDRAM, which can also be done in bounded steps. Measured: a
-  5 s mono reverb takes ~78 % of the CPU at 480 MHz.
+  5 s mono reverb takes ~76 % of the CPU at 480 MHz, a two-mic cabinet ~11 %.
 - **One input, up to 4 outputs**, each with its own IR. The outputs share the
   input FFTs and delay lines, so a stereo reverb from a mono guitar costs far
   less than two engines.
@@ -60,7 +60,7 @@ As a git submodule next to libDaisy:
 
 ```sh
 git submodule add https://github.com/VZtec/daisyConvol lib/daisyconvol
-git -C lib/daisyconvol checkout v0.1.0
+git -C lib/daisyconvol checkout v0.2.0
 ```
 
 Your Makefile names its sources and libDaisy, sets any [build
@@ -182,10 +182,10 @@ QSPI (`make program-boot` once).
 | Example | What it is | CPU (480 MHz, block 32) |
 |---------|------------|-------------------------|
 | [seed](examples/seed/main.cpp) | The minimal firmware: one 4096-sample cabinet IR, internal flash, C++14 | not yet measured |
-| [cabsim](examples/cabsim/README.md) | Guitar cabinet: Marshall 4x12 Greenback, SM57 + R1 mics, blend or wide stereo; all in the audio callback | ~16 % |
-| [hall_reverb](examples/hall_reverb/README.md) | 5 s hall reverb (Elveden Hall, Marble Hall), dry/wet; `MONO=0` for stereo | ~79 % |
-| [church_reverb](examples/church_reverb/README.md) | 5 s church reverb (Iglesia San Pedro, Chivilcoy), dry/wet | ~78 % |
-| [irswitch](examples/irswitch/README.md) | Switching IRs while audio runs, regenerating the free one in bounded steps | ~10 % (cab) |
+| [cabsim](examples/cabsim/README.md) | Guitar cabinet: Marshall 4x12 Greenback, SM57 + R1 mics, blend or wide stereo; all in the audio callback | ~11 % |
+| [hall_reverb](examples/hall_reverb/README.md) | 5 s hall reverb (Elveden Hall, Marble Hall), dry/wet; `MONO=0` for stereo | ~76 % |
+| [church_reverb](examples/church_reverb/README.md) | 5 s church reverb (Iglesia San Pedro, Chivilcoy), dry/wet | ~76 % |
+| [irswitch](examples/irswitch/README.md) | Switching IRs while audio runs, regenerating the free one in bounded steps | ~6 % (cab) |
 | [convolver](examples/convolver/README.md) | Benchmark: any block size / IR length / outputs, per-stage cycle log | see [Performance](#performance) |
 
 ## How it works
@@ -201,8 +201,12 @@ QSPI (`make program-boot` once).
   in the main loop. The main loop and the callback exchange data through a
   lock-free single-producer / single-consumer handoff.
 
-The FFTs are CMSIS-DSP's `arm_rfft_fast_f32`, using overlap-save with
-2P-point FFTs.
+The convolution is overlap-save with 2P-point real FFTs. They run on the
+complex FFT of CMSIS-DSP (the butterflies of `arm_rfft_fast_f32`), without
+its bit-reversal pass: the real-spectrum split reads the bins where the
+butterflies leave them, and the inverse is the same forward transform
+(IDFT(Z)[m] = DFT(Z)[-m] / M), computing only the half of the output that
+overlap-save keeps.
 
 **Choosing the geometry.** `ConvEngine::MakeGeometry` derives it from the
 block size and the maximum IR length, or you can pass your own in
@@ -318,7 +322,7 @@ audio callback (an interrupt) and *main* means `main()` / the main loop.
 `DoBackgroundWork()` must finish each main-loop frame (2048 samples, 42.7 ms
 at 48 kHz) within one such period after its input is complete. A frame takes
 ~12 ms at 480 MHz for a 2 s mono IR and ~30 ms for 5 s. The audio callbacks
-take ~11 % of the time on top of that, so the rest of each main-loop
+take ~7 % of the time on top of that, so the rest of each main-loop
 iteration has to fit in what remains.
 
 If the loop has other work (a display, controls), call `DoBackgroundStep()`
@@ -421,14 +425,15 @@ bounds.
 | Example / configuration | Callback avg / peak | Main-loop frame | Total CPU |
 |-------------------------|---------------------|-----------------|-----------|
 | `examples/seed`: 4096-sample cabinet | not yet measured | - | not yet measured |
-| `cabsim`: two mics, 4096 samples each | 52.5 k cycles / 24 % | - | ~16 % |
-| `convolver IR_LEN=4096`: cabinet | 31.9 k / 20 % | - | ~10 % |
-| `convolver`: 2 s IR (96000 samples) | 32.4 k / 20 % | 5.75 M cycles | ~38 % |
-| `convolver STEREO=1`: 2 s stereo IR | 54.2 k / 29 % | 9.31 M | ~62 % |
-| `convolver TABLES_IN_RAM=0`: FFT tables left in QSPI | 37.0 k / 31 % | 6.18 M | ~42 % |
-| `hall_reverb`: 5 s mono IR, dry/wet | 34.7 k / 14 % | 14.3 M | ~79 % |
-| `church_reverb`: 5 s mono IR, dry/wet | 33.9 k / 14 % | 14.1 M | ~78 % |
-| `hall_reverb MONO=0`: 2 s stereo IR | 54.5 k / 27 % | 9.4 M | ~62 % |
+| `cabsim`: two mics, 4096 samples each | 34.3 k cycles / 22 % | - | ~11 % |
+| `cabsim ITCM=1`: same, engine and FFT code in ITCM | 30.2 k / 16 % | - | ~9 % |
+| `convolver IR_LEN=4096`: cabinet | 19.8 k / 20 % | - | ~6 % |
+| `convolver`: 2 s IR (96000 samples) | 20.9 k / 18 % | 5.78 M cycles | ~35 % |
+| `convolver STEREO=1`: 2 s stereo IR | 34.3 k / 21 % | 9.30 M | ~56 % |
+| `convolver TABLES_IN_RAM=0`: FFT tables left in QSPI | 29.6 k / 31 % | 6.37 M | ~40 % |
+| `hall_reverb`: 5 s mono IR, dry/wet | 22.6 k / 15 % | 14.2 M | ~76 % |
+| `church_reverb`: 5 s mono IR, dry/wet | 22.5 k / 15 % | 14.2 M | ~76 % |
+| `hall_reverb MONO=0`: 2 s stereo IR | 34.0 k / 20 % | 9.34 M | ~56 % |
 
 How the columns are computed:
 
@@ -441,21 +446,22 @@ The 2 s IR at other block sizes (`convolver BLOCK=...`):
 
 | B | Callback avg | Callback peak | Main-loop frame | Total CPU |
 |---|--------------|---------------|-----------------|-----------|
-| 16 | 21.9 k | 29 % | 5.83 M | ~42 % |
-| 32 | 32.4 k | 20 % | 5.75 M | ~38 % |
-| 64 | 48.6 k | 14 % | 5.60 M | ~35 % |
-| 128 | 108 k | 16 % | 6.60 M | ~41 % |
-| 256 | 142 k | 6 % | 6.54 M | ~37 % |
+| 16 | 13.6 k | 28 % | 5.93 M | ~38 % |
+| 32 | 20.9 k | 18 % | 5.78 M | ~35 % |
+| 64 | 35.9 k | 14 % | 5.72 M | ~34 % |
+| 128 | 81.9 k | 14 % | 6.72 M | ~39 % |
+| 256 | 101 k | 5 % | 6.67 M | ~37 % |
 
 Reverb length vs. CPU (mono, block 32, `hall_reverb MONO=1 IR_LEN=...`):
 
 | IR | 1 s | 2 s | 3 s | 4 s | 5 s | 6 s |
 |----|-----|-----|-----|-----|-----|-----|
-| Total CPU | 25 % | 38 % | 52 % | 65 % | 79 % | 92 % |
+| Total CPU | 22 % | 35 % | 49 % | 62 % | 76 % | ~90 % (estimated) |
 
-The callback share stays at ~11 %. Each second of IR adds ~13.5 % in the
-main loop, which is the SDRAM bandwidth. At 6 s the frames and the callbacks
-fill 97 % of the frame period, so 5 s is the practical maximum in mono.
+The callback share stays at ~7 %. Each second of IR adds ~13.5 % in the
+main loop, which is the SDRAM bandwidth. The bundled IR is 5 s long, so 6 s
+is extrapolated: the frames and the callbacks would fill ~93 % of the frame
+period at their peak, which makes 5 s the practical maximum in mono.
 
 Next to other heavy DSP, code placement matters. Running the engine from
 QSPI through the 16 KB I-cache doubled its stage-1 cost next to a NAM amp
